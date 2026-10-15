@@ -21,11 +21,11 @@ the Vectorize catalog provider, despite sharing the name `hindsight`.
 
 ## Install and setup, per profile
 
-Use the paired host and the `v1.0.2` release from this repository. For an immutable
-installation, replace the tag with its reviewed full commit hash:
+Use the paired host and this reviewed `v1.0.2` commit. The native installer requires
+a full 40-character commit SHA for `--ref`; tag names are not accepted:
 
 ```bash
-hermes -p example plugins install 'https://github.com/ThomasMarcelis/hermes-hindsight-durable#hindsight' --ref v1.0.2 --yes-deps --enable
+hermes -p example plugins install 'https://github.com/ThomasMarcelis/hermes-hindsight-durable#hindsight' --ref d115f569e1338eff7d95a11ad2abddb5f643c796 --yes-deps --enable
 hermes -p example memory setup hindsight
 ```
 
