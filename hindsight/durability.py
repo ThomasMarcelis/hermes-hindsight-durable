@@ -15,8 +15,7 @@ from typing import Any, Callable, Dict, Optional
 logger = logging.getLogger(__name__)
 _MAX_AUTOMATIC_SETTLEMENT_RETRIES = 2
 _SETTLEMENT_RETRY_BASE_DELAY_S = 0.05
-_RETAIN_OP_PREFETCH_POLL_CAP = 4
-_RETAIN_OP_DRAIN_POLL_CAP = 4
+_RETAIN_OP_POLL_CAP = 4
 
 @dataclass
 class _DeliveryState:
@@ -46,6 +45,8 @@ class _DeliveryState:
     failed: bool = False
     invalidated: bool = False
     dispatch_started: bool = False
+    dispatched_end: int = 0
+    acknowledgement_uncertain: bool = False
     rewind_repair: bool = False
     delete_document: bool = False
     repair_completed: bool = False
@@ -135,7 +136,7 @@ class HindsightDurabilityMixin:
                 or getattr(exc, "status_code", None) == 404
             ):
                 return "completed"
-            logger.debug("Retain operation status check failed for %s: %s", op_id, exc)
+            logger.debug("Retain operation status check failed (%s)", type(exc).__name__)
             return "pending"
         status = str(getattr(resp, "status", "") or "").lower()
         return status if status in {"completed", "failed"} else "pending"
@@ -172,7 +173,7 @@ class HindsightDurabilityMixin:
             try:
                 callback()
             except Exception as exc:
-                logger.warning("Hindsight retain settlement callback failed: %s", exc)
+                logger.warning("Hindsight retain settlement callback failed (%s)", type(exc).__name__)
 
 
     def _wait_for_retains_drained(self, timeout: float, *, purpose: str = "prefetch") -> bool:
@@ -241,11 +242,7 @@ class HindsightDurabilityMixin:
         lifecycle/shutdown chance to prove durability.
         """
         per_op_polls: dict[str, int] = {}
-        poll_cap = (
-            _RETAIN_OP_PREFETCH_POLL_CAP
-            if purpose == "prefetch"
-            else _RETAIN_OP_DRAIN_POLL_CAP
-        )
+        poll_cap = _RETAIN_OP_POLL_CAP
         while True:
             with self._pending_retain_ops_lock:
                 pending = []
@@ -366,12 +363,6 @@ class HindsightDurabilityMixin:
             return state
 
 
-    def _sync_active_delivery_watermarks(self, state: _DeliveryState) -> None:
-        if self._active_delivery_state is state:
-            self._last_retained_turn_count = state.committed
-            self._queued_retained_turn_count = state.queued
-
-
     def _mark_delivery_failed(self, state: _DeliveryState) -> None:
         with self._delivery_lock:
             if state.invalidated:
@@ -382,7 +373,6 @@ class HindsightDurabilityMixin:
             state.remote_pending = False
             state.dispatch_started = False
             state.failed = True
-            self._sync_active_delivery_watermarks(state)
 
 
     def _schedule_delivery_retry(self, state: _DeliveryState) -> bool:
@@ -436,6 +426,7 @@ class HindsightDurabilityMixin:
                 state.confirmed_turns.extend(state.turns[:end])
                 del state.turns[:end]
                 state.turn_base += end
+                state.dispatched_end = max(0, state.dispatched_end - end)
                 state.committed = state.queued = 0
             queue_more = (
                 state.committed < len(state.turns)
@@ -447,7 +438,6 @@ class HindsightDurabilityMixin:
                     candidate for candidate in self._delivery_states
                     if candidate is not state
                 ]
-            self._sync_active_delivery_watermarks(state)
         if queue_more:
             self._queue_delivery(state, force=state.force_settle, retry=True)
 
@@ -496,6 +486,13 @@ class HindsightDurabilityMixin:
                     or (old_state.rewind_repair and not old_state.repair_completed)
                 )
             )
+            if old_state is not None and (
+                (old_state.normal_update_mode or old_state.update_mode) == "append"
+                or old_state.acknowledgement_uncertain
+                or (old_state.dispatch_started and not old_state.remote_pending)
+            ):
+                self._rewind_without_remote_repair(old_state, surviving_turns)
+                return
             if old_state is not None:
                 old_state.invalidated = True
                 self._delivery_states = [
@@ -505,8 +502,6 @@ class HindsightDurabilityMixin:
             self._session_turns = surviving_turns
             self._turn_counter = len(surviving_turns)
             self._turn_index = len(surviving_turns)
-            self._last_retained_turn_count = 0
-            self._queued_retained_turn_count = 0
             self._active_delivery_state = None
 
             if old_state is not None:
@@ -534,6 +529,43 @@ class HindsightDurabilityMixin:
             # waits for accepted remote ops before rewriting, so no stale append
             # can land after the repair.
             self._queue_delivery(repair_state, force=True)
+
+
+    def _rewind_without_remote_repair(self, old: _DeliveryState, surviving: list[str]) -> None:
+        """Shared documents and unacknowledged requests cannot be safely replaced.
+
+        Keep dispatched ranges on their original settlement/retry ledger. Only the
+        undispatched surviving suffix moves to the new active ledger, preventing
+        either lost accepted work or re-appending an entire historical transcript.
+        """
+        attempted = old.dispatched_end
+        unsent = [turn for turn in old.turns[attempted:] if turn in surviving]
+        confirmed = [turn for turn in old.confirmed_turns if turn in surviving]
+        if attempted:
+            del old.turns[attempted:]
+        else:
+            old.invalidated = True
+            self._delivery_states = [state for state in self._delivery_states if state is not old]
+        mode = old.normal_update_mode or old.update_mode
+        document_id = old.document_id
+        if mode != "append":
+            # Never target an ambiguous legacy document with a later replacement.
+            from . import _mint_document_id
+            document_id = self._document_id = _mint_document_id(self._session_id)
+        self._session_turns = unsent
+        self._turn_counter = self._turn_index = len(surviving)
+        state = _DeliveryState(
+            turns=unsent, bank_id=old.bank_id, session_id=old.session_id,
+            parent_session_id=old.parent_session_id, document_id=document_id,
+            update_mode=mode, retain_async=old.retain_async, context=old.context,
+            metadata=dict(old.metadata), tags=old.tags,
+            confirmed_turns=confirmed if mode == "append" else [],
+            turn_base=len(confirmed) if mode == "append" else 0,
+        )
+        self._active_delivery_state = state
+        self._delivery_states.append(state)
+        logger.warning("Hindsight remote rewind refused: document ownership or acknowledgement is uncertain; "
+                       "already dispatched memories remain retained")
 
 
     def _queue_delivery(
@@ -574,7 +606,6 @@ class HindsightDurabilityMixin:
             if end <= state.committed and not self._state_has_pending_delivery(state):
                 state.delivery_due = False
                 state.force_settle = False
-                self._sync_active_delivery_watermarks(state)
                 return False
             delivery_update_mode = state.update_mode
             start = state.committed if delivery_update_mode == "append" else 0
@@ -589,9 +620,11 @@ class HindsightDurabilityMixin:
             state.delivery_due = False
             if not any(candidate is state for candidate in self._delivery_states):
                 self._delivery_states.append(state)
-            self._sync_active_delivery_watermarks(state)
 
-        content = "[" + ",".join(turns) + "]"
+        # Identities are local ledger bookkeeping, never extraction-model input.
+        remote_turns = [json.dumps([{key: value for key, value in row.items() if key != "message_uid"}
+                                   for row in json.loads(turn)], ensure_ascii=False) for turn in turns]
+        content = "[" + ",".join(remote_turns) + "]"
         metadata = dict(state.metadata)
         metadata["retained_at"] = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         metadata["turn_index"] = str(state.turn_base + end)
@@ -617,6 +650,7 @@ class HindsightDurabilityMixin:
                         state.queued = state.committed
                     return
                 state.dispatch_started = True
+                state.dispatched_end = max(state.dispatched_end, end)
 
             if state.rewind_repair:
                 wait_budget = max(0.0, float(self._prefetch_retain_drain_timeout))
@@ -672,6 +706,8 @@ class HindsightDurabilityMixin:
                     retain_async=state.retain_async,
                 )
             except Exception:
+                with self._delivery_lock:
+                    state.acknowledgement_uncertain = True
                 self._mark_delivery_failed(state)
                 if state.force_settle:
                     self._schedule_delivery_retry(state)

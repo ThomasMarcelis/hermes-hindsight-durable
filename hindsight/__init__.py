@@ -95,7 +95,7 @@ def _cloud_api_key(config: dict) -> str:
     return config.get("apiKey") or config.get("api_key") or get_secret("HINDSIGHT_API_KEY", "")
 
 
-def _maybe_upgrade_client() -> None:
+def _warn_if_client_outdated() -> None:
     """Report stale client metadata without changing a running dependency generation."""
     from importlib.metadata import PackageNotFoundError, version as pkg_version
     from packaging.version import InvalidVersion, Version
@@ -140,7 +140,7 @@ def _fetch_hindsight_api_version(api_url: str, api_key: str | None = None,
             payload = resp.read().decode("utf-8", errors="replace")
         data = json.loads(payload)
     except Exception as exc:
-        logger.debug("Hindsight /version probe failed for %s: %s", url, exc)
+        logger.debug("Hindsight /version probe failed (%s)", type(exc).__name__)
         return None
     if not isinstance(data, dict):
         return None
@@ -164,7 +164,7 @@ def _check_api_supports_update_mode_append(api_url: str, api_key: str | None = N
             return _append_capability_cache[cache_key]
     metadata = _fetch_hindsight_api_version(api_url, api_key)
     features = metadata.get("features", {}) if isinstance(metadata, dict) else {}
-    version = (metadata.get("version") or metadata.get("api_version")) if isinstance(metadata, dict) else metadata
+    version = (metadata.get("version") or metadata.get("api_version")) if isinstance(metadata, dict) else None
     source_text_stored = not isinstance(features, dict) or features.get("store_document_text", True) is not False
     try:  # missing/invalid version -> unsupported
         from packaging.version import Version
@@ -218,7 +218,20 @@ def _run_sync(coro, timeout: float = _DEFAULT_TIMEOUT):
     future = safe_schedule_threadsafe(coro, _get_loop())
     if future is None:
         raise RuntimeError("Hindsight loop unavailable")
-    return future.result(timeout=timeout)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()  # Local cancellation cannot prove the server rejected the write.
+        raise
+
+
+def _compatible_host() -> bool:
+    from agent import memory_provider
+    return getattr(memory_provider, "MEMORY_LIFECYCLE_API_VERSION", 0) >= 1
+
+
+def _host_requirement() -> str:
+    return "Durable Hindsight requires Hermes memory lifecycle API 1; install the paired host before enabling memory."
 
 
 RETAIN_SCHEMA = {
@@ -339,9 +352,7 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
 
     def backup_paths(self) -> List[str]:
         """Legacy shared config + embedded-mode profile env files live under ~/.hindsight."""
-        with contextlib.suppress(Exception):
-            return [str(Path.home() / ".hindsight")]
-        return []
+        return [str(Path.home() / ".hindsight")]
 
     def __init__(self):
         self._config = self._api_key = self._client = None
@@ -349,7 +360,6 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         self._timeout, self._idle_timeout = _DEFAULT_TIMEOUT, _DEFAULT_IDLE_TIMEOUT
         self._bank_id, self._budget, self._bank_id_template = "hermes", "mid", ""
         self._bank_id_fallback = "hermes"
-        self._bank_mission, self._bank_retain_mission = "", None
         self._memory_mode = "hybrid"  # "context", "tools", or "hybrid"
         self._prefetch_method = "recall"  # "recall" or "reflect"
         for name in _SESSION_KWARGS:
@@ -362,19 +372,15 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         # "cannot schedule new futures" / "Unclosed client session").
         self._retain_queue: queue.Queue = queue.Queue()
         self._writer_thread: threading.Thread | None = None
-        self._sync_thread = None  # legacy alias external callers may join; points at the writer
         self._shutting_down = threading.Event()
         self._atexit_registered = False
         self._retain_tags: List[str] = []
-        self._tags: list[str] | None = None
         self._observation_scopes = None
         self._observation_scope_exclude_tag_prefixes: list[str] = []
         self._retain_source = _DEFAULT_RETAIN_SOURCE
         self._retain_user_prefix, self._retain_assistant_prefix = "User", "Assistant"
         self._turn_counter = self._turn_index = 0
         self._session_turns: list[str] = []  # ALL turns for the session
-        self._last_retained_turn_count = 0  # committed append watermark
-        self._queued_retained_turn_count = 0
         self._delivery_lock = threading.RLock()
         self._active_delivery_state: _DeliveryState | None = None
         self._delivery_states: list[_DeliveryState] = []
@@ -408,6 +414,8 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         return "hindsight"
 
     def is_available(self) -> bool:
+        if not _compatible_host():
+            return False
         try:
             cfg = _load_config()
             mode = cfg.get("mode", "cloud")
@@ -419,13 +427,9 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
             return False
 
     def unavailable_reason(self) -> str:
-        """Install hint for an unavailable local_embedded runtime (is_available() gates
-        initialize() out, so the hint it would log never fires; agent_init shows this).
-
-        ``is_available()`` returns False for local modes when the embedded runtime can't be imported, so
-        ``initialize()`` — and the hint it would log — is never reached (#7718). Surface the install
-        guidance here, where agent_init warns about an unavailable provider.
-        """
+        """Explain unavailable host or bring-your-own embedded runtime."""
+        if not _compatible_host():
+            return _host_requirement()
         try:
             if _load_config().get("mode", "cloud") not in _LOCAL_MODES:
                 return ""
@@ -461,8 +465,6 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
             {"key": "llm_model", "description": "LLM model", "default": "gpt-4o-mini", "default_from": {"field": "llm_provider", "map": _PROVIDER_DEFAULT_MODELS}, "when": {"mode": "local_embedded"}},
             {"key": "bank_id", "description": "Memory bank name (static fallback when bank_id_template is unset)", "default": "hermes"},
             {"key": "bank_id_template", "description": "Optional template to derive bank_id dynamically. Placeholders: {profile}, {workspace}, {platform}, {user}, {session}. Example: hermes-{profile}", "default": ""},
-            {"key": "bank_mission", "description": "Mission/purpose description for the memory bank"},
-            {"key": "bank_retain_mission", "description": "Custom extraction prompt for memory retention"},
             {"key": "recall_budget", "description": "Recall thoroughness", "default": "mid", "choices": ["low", "mid", "high"]},
             {"key": "memory_mode", "description": "Memory integration mode", "default": "hybrid", "choices": ["hybrid", "context", "tools"]},
             {"key": "recall_prefetch_method", "description": "Auto-recall method", "default": "recall", "choices": ["recall", "reflect"]},
@@ -534,6 +536,8 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
 
     def _get_client(self):
         """Return the cached Hindsight client (created once, reused)."""
+        if self._mode == "disabled" or self._shutting_down.is_set():
+            raise RuntimeError("Hindsight provider is disabled or shut down")
         if self._client is None:
             self._client = self._new_embedded_client() if self._mode == "local_embedded" else self._new_cloud_client()
         return self._client
@@ -567,7 +571,7 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         # A previous writer may have exited after shutdown(); allow the fresh one to drain.
         self._shutting_down.clear()
         thread = spawn_context_thread(self._writer_loop, name="hindsight-writer")
-        self._writer_thread = self._sync_thread = thread
+        self._writer_thread = thread
         thread.start()
 
     def _register_atexit(self) -> None:
@@ -592,7 +596,7 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
                     return
                 job()
             except Exception as exc:
-                logger.warning("Hindsight retain failed: %s", exc, exc_info=True)
+                logger.warning("Hindsight retain failed (%s)", type(exc).__name__)
             finally:
                 self._retain_queue.task_done()
 
@@ -602,31 +606,14 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         try:
             self.shutdown(settlement_timeout=0.25)
         except Exception as exc:
-            logger.debug("Hindsight atexit shutdown failed: %s", exc)
-
-
-
-    def _is_retain_op_complete(self, bank_id: str, op_id: str) -> bool:
-        return self._retain_op_status(bank_id, op_id) != "pending"
-
-
-
+            logger.debug("Hindsight atexit shutdown failed (%s)", type(exc).__name__)
 
 
     # -- retain target -----------------------------------------------------------
 
     def _resolve_retain_target(self, fallback_document_id: str) -> tuple[str, str | None]:
-        """(document_id, update_mode) from live API capability: >= 0.5.0 reuses the
-        stable session-scoped id with ``update_mode='append'``; older APIs get
-        *fallback_document_id* (per-process unique) and no update_mode — the only
-        way the resume-overwrite fix works there. The /version probe targets the
-        embedded client's dynamic per-profile port when running, else api_url.
-
-        On Hindsight ≥ 0.5.0 the API supports ``update_mode='append'``, which lets us reuse a stable
-        session-scoped ``document_id`` across process lifecycles without overwriting prior turns. On older
-        APIs we fall back to *fallback_document_id* (the per-process unique ``f"{session_id}-{start_ts}"``
-        minted at initialize / switch time) and don't pass ``update_mode`` at all — that's the only way the
-        resume-overwrite fix (#6654) keeps working on legacy servers.
+        """Use the shared session append document when supported; otherwise use a
+        unique document so a new provider lifetime cannot overwrite old memory.
         """
         url = getattr(self._client, "url", None) if self._mode == "local_embedded" else None
         probe_url = str(url) if url else (self._api_url or "")
@@ -637,6 +624,9 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
     # -- lifecycle ---------------------------------------------------------------
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        if not _compatible_host():
+            self._mode = "disabled"
+            raise RuntimeError(_host_requirement())
         with self._prefetch_lock:
             self._prefetch_generation += 1
             self._prefetch_request_token += 1
@@ -653,12 +643,12 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         self._platform = str(kwargs.get("platform") or "cli")
         # session_id stays in tags so processes for one session remain filterable together.
         self._document_id = _mint_document_id(self._session_id)
-        _maybe_upgrade_client()
+        _warn_if_client_outdated()
 
         self._config = cfg = _load_config()
         for name in _SESSION_KWARGS:
             setattr(self, f"_{name}", str(kwargs.get(name) or "").strip())
-        self._turn_index = self._last_retained_turn_count = self._queued_retained_turn_count = 0
+        self._turn_index = 0
         self._session_turns = []
         self._active_delivery_state = None
         self._delivery_states = []
@@ -694,7 +684,7 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
                      "retain_async=%s, retain_context=%s, recall_max_tokens=%d, recall_max_input_chars=%d, tags=%s, recall_tags=%s",
                      self._auto_retain, self._auto_recall, self._retain_every_n_turns,
                      self._retain_async, self._retain_context, self._recall_max_tokens, self._recall_max_input_chars,
-                     self._tags, self._recall_tags)
+                     self._retain_tags, self._recall_tags)
 
         if self._mode == "local_embedded":
             self._start_embedded_daemon()
@@ -721,8 +711,6 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         self._memory_mode = memory_mode if memory_mode in _SYSTEM_PROMPT_TAILS else "hybrid"
         prefetch_method = cfg.get("recall_prefetch_method") or cfg.get("prefetch_method", "recall")
         self._prefetch_method = prefetch_method if prefetch_method in {"recall", "reflect"} else "recall"
-        self._bank_mission = cfg.get("bank_mission", "")
-        self._bank_retain_mission = cfg.get("bank_retain_mission") or None
 
     def _apply_retain_settings(self, cfg: dict) -> None:
         def _cfg_or_env(key: str, env_var: str, default: str = "") -> Any:
@@ -731,7 +719,6 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
             return cfg.get(key) or _scoped_setting(env_var, default)
 
         self._retain_tags = _normalize_retain_tags(_cfg_or_env("retain_tags", "HINDSIGHT_RETAIN_TAGS"))
-        self._tags = self._retain_tags or None
         self._observation_scopes = _normalize_observation_scopes(
             cfg["observation_scopes"] if "observation_scopes" in cfg
             else _scoped_setting("HINDSIGHT_RETAIN_OBSERVATION_SCOPES", ""))
@@ -812,7 +799,6 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         spawn_context_thread(self._daemon_start_worker, name="hindsight-daemon-start").start()
 
     def _daemon_start_worker(self) -> None:
-        import traceback
         log_path = get_hermes_home() / "logs" / "hindsight-embed.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -850,9 +836,11 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
             client._ensure_started()
             _log("\n=== Daemon started successfully ===\n")
         except Exception as e:
-            _log(f"\n=== Daemon startup failed: {e} ===\n" + traceback.format_exc())
+            _log(f"\n=== Daemon startup failed ({type(e).__name__}) ===\n")
 
     def system_prompt_block(self) -> str:
+        if self._mode == "disabled":
+            return ""
         mode = self._memory_mode if self._memory_mode in _SYSTEM_PROMPT_TAILS else "hybrid"
         label = "" if mode == "hybrid" else f" ({mode} mode)"
         tail = _SYSTEM_PROMPT_TAILS[mode]
@@ -865,7 +853,7 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
 
     def _recall_disabled(self) -> bool:
         """Guards shared by the async and synchronous recall paths."""
-        why = ("tools-only mode" if self._memory_mode == "tools" else "auto_recall disabled" if not self._auto_recall
+        why = ("disabled" if self._mode == "disabled" else "tools-only mode" if self._memory_mode == "tools" else "auto_recall disabled" if not self._auto_recall
                else "shutting down" if self._shutting_down.is_set() else None)
         if why:
             logger.debug("Prefetch: skipped (%s)", why)
@@ -901,7 +889,7 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
             logger.debug("Recall: returned %d results", len(results))
             return "\n".join(f"- {r.text}" for r in results if r.text), len(results)
         except Exception as e:
-            logger.debug("Hindsight recall failed: %s", e, exc_info=True)
+            logger.debug("Hindsight recall failed (%s)", type(e).__name__)
             return "", 0
 
     def _finish_prefetch(self, result: str, count: int) -> str:
@@ -926,6 +914,8 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         self._prefetch_thread.join(timeout=timeout)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        if self._recall_disabled():
+            return self._finish_prefetch("", 0)
         # Opt-in: recall synchronously against the *current* message so the
         # injected memories match this turn's query rather than the previous
         # turn's queued recall. See NousResearch/hermes-agent#5820.
@@ -949,19 +939,11 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
             self._prefetch_thread.join(timeout=3.0)
         with self._prefetch_lock:
             requested_session = str(session_id or "").strip()
-            legacy_unowned_result = bool(self._prefetch_result) and (
-                self._prefetch_result_generation == -1
-                and self._prefetch_result_request_token == -1
-                and not self._prefetch_result_session_id
-            )
             owned_result = (
-                legacy_unowned_result
-                or (
-                    self._prefetch_result_generation == self._prefetch_generation
-                    and self._prefetch_result_request_token == self._prefetch_request_token
-                    and self._prefetch_result_session_id == self._session_id
-                    and (not requested_session or requested_session == self._session_id)
-                )
+                self._prefetch_result_generation == self._prefetch_generation
+                and self._prefetch_result_request_token == self._prefetch_request_token
+                and self._prefetch_result_session_id == self._session_id
+                and (not requested_session or requested_session == self._session_id)
             )
             result = self._prefetch_result if owned_result else ""
             count = self._prefetch_count if owned_result else 0
@@ -1085,12 +1067,11 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         return self._run_hindsight_operation(lambda client: client.aretain_batch(**kwargs))
 
 
-
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "",
                   messages: list[dict] | None = None) -> None:
         """Enqueue a retain for the current turn (non-blocking; writer thread). Dropped
         once shutdown() fired so post-exit retains never reach aiohttp during teardown."""
-        why = "auto_retain disabled" if not self._auto_retain else "shutting down" if self._shutting_down.is_set() else None
+        why = "disabled" if self._mode == "disabled" else "auto_retain disabled" if not self._auto_retain else "shutting down" if self._shutting_down.is_set() else None
         if why:
             logger.debug("sync_turn: skipped (%s)", why)
             return
@@ -1133,7 +1114,7 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
     # -- tools -------------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        if self._memory_mode == "context":
+        if self._mode == "disabled" or self._shutting_down.is_set() or self._memory_mode == "context":
             return []
         return ([RETAIN_SCHEMA] if self._expose_retain_tool else []) + [RECALL_SCHEMA, REFLECT_SCHEMA]
 
@@ -1141,8 +1122,7 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         content, context = args["content"], args.get("context")
         item = self._build_retain_kwargs(content, context=context, tags=args.get("tags"),
                                          occurred_at=args.get("occurred_at"))
-        logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
-                     self._bank_id, len(content), context)
+        logger.debug("Tool hindsight_retain: content_len=%d", len(content))
         self._retain_batch(item, bank_id=self._bank_id)
         logger.debug("Tool hindsight_retain: success")
         return "Memory stored successfully."
@@ -1171,6 +1151,8 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
     }
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
+        if self._mode == "disabled" or self._shutting_down.is_set():
+            return tool_error("Hindsight provider is disabled or shut down")
         if tool_name == "hindsight_retain" and not self._expose_retain_tool:
             return tool_error("hindsight_retain is disabled by configuration")
         if tool_name not in self._TOOL_HANDLERS:
@@ -1181,8 +1163,8 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         try:
             return json.dumps({"result": handler(self, args)})
         except Exception as e:
-            logger.warning("%s failed: %s", tool_name, e, exc_info=True)
-            return tool_error(f"{failure}: {e}")
+            logger.warning("%s failed (%s)", tool_name, type(e).__name__)
+            return tool_error(f"{failure} ({type(e).__name__})")
 
     # -- session lifecycle -------------------------------------------------------
 
@@ -1282,8 +1264,6 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         self._session_turns = []
         self._turn_counter = 0
         self._turn_index = 0
-        self._last_retained_turn_count = 0
-        self._queued_retained_turn_count = 0
         self._active_delivery_state = None
         if old_prefetch_thread and old_prefetch_thread.is_alive():
             old_prefetch_thread.join(timeout=3.0)
@@ -1350,29 +1330,17 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
             self._client = None
         elif writer_alive:
             logger.warning("Hindsight client left open for detached writer safety; process exit will reclaim it")
-        # Shared loop deliberately survives: sibling providers still own sessions on it.
-        # The module-global loop is intentionally NOT stopped: it's shared by every
-        # provider in the process (one per gateway chat session); stopping it would
-        # strand siblings' aiohttp sessions ("Unclosed client session"). Daemon
-        # thread, reclaimed at process exit.
+        if self._atexit_registered:
+            atexit.unregister(self._atexit_shutdown)
+            self._atexit_registered = False
+        if self._last_drain_ok and not writer_alive:
+            with self._delivery_lock:
+                self._session_turns.clear()
+                self._delivery_states.clear()
+                self._active_delivery_state = None
+        # The shared event loop stays alive for sibling providers.
 
 
-# The module-global background event loop (_loop / _loop_thread) is intentionally NOT stopped here. It is
-# shared across every HindsightMemoryProvider instance in the process — the plugin loader creates a new
-# provider per AIAgent, and the gateway creates one AIAgent per concurrent chat session. Stopping the loop
-# from one provider's shutdown() strands the aiohttp ClientSession + TCPConnector owned by every sibling
-# provider on a dead loop, which surfaces as the "Unclosed client session" / "Unclosed connector" warnings
-# reported in #11923. The loop runs on a daemon thread and is reclaimed on process exit; per-session cleanup
-# happens via self._client.aclose() above.
 def register(ctx) -> None:
     """Register Hindsight as a memory provider plugin."""
     ctx.register_memory_provider(HindsightMemoryProvider())
-
-
-# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
-# Names external plugins imported from this module before the Sep 2026 decomposition.
-# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
-# The whole block is removed by reverting the commit that added it.
-from dataclasses import dataclass  # noqa: F401,E402
-import importlib  # noqa: F401,E402
-# ---- END PLUGIN-COMPAT ----

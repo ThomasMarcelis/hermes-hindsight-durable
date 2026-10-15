@@ -17,15 +17,12 @@ _DEFAULT_LOCAL_URL = "http://localhost:8888"
 _MIN_CLIENT_VERSION = "0.6.1"
 _DEFAULT_TIMEOUT = 120  # seconds — cloud API can take 30-40s per request
 _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
-# ``metadata.source`` on retained memories is OPT-IN (AGENTS.md forbids
-# on-by-default attribution tags): ``retain_source`` / HINDSIGHT_RETAIN_SOURCE.
+# ``metadata.source`` is opt-in through retain_source / HINDSIGHT_RETAIN_SOURCE.
 _DEFAULT_RETAIN_SOURCE = ""
 # Hindsight brand mark (eye ringed by graph nodes) for the recall/retain indicators.
 _HINDSIGHT_GLYPH = "👁️"
 # Hindsight 0.5.0 added ``update_mode='append'``; older APIs would silently
 # overwrite prior turns under a stable document_id, so they keep the per-process id.
-# Mirrors hindsight-integrations/openclaw — Hindsight 0.5.0 added `update_mode='append'` semantics on retain
-# (vectorize-io/hindsight#932).
 _MIN_VERSION_FOR_UPDATE_MODE_APPEND = "0.5.0"
 _VALID_BUDGETS = {"low", "mid", "high"}
 _PROVIDER_DEFAULT_MODELS = {

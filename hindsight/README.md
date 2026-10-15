@@ -1,109 +1,83 @@
-# Durable Hindsight for Hermes
+# Durable Hindsight memory for Hermes
 
-Long-term memory with knowledge graph, entity resolution, and multi-strategy retrieval. Supports cloud, local embedded, and local external modes.
+Retain conversation exchanges and explicitly saved facts in Hindsight, then recall
+or reflect on them across sessions. This independently maintained integration keeps
+session-owned delivery queues, bounded settlement and retry, observation-scope
+filtering, and optional automatic-only retention.
 
-## Requirements
+## Supported host
 
-- **Cloud:** API key from [ui.hindsight.vectorize.io](https://ui.hindsight.vectorize.io)
-- **Local Embedded:** API key for a supported LLM provider (OpenAI, Anthropic, Gemini, Groq, OpenRouter, MiniMax, Ollama, or any OpenAI-compatible endpoint). Embeddings and reranking run locally — no additional API keys needed.
-- **Local External:** A running Hindsight instance (Docker or self-hosted) reachable over HTTP.
+Requires Hermes **memory lifecycle API 1** in addition to the manifest's 0.22.2
+version floor. Vanilla v0.22.2 lacks that contract: this provider refuses availability
+and initialization there. The paired host supplies FIFO session-switch fencing,
+bounded drain, and final-assistant identities for CLI/TUI rewind with or without
+SQLite. The exact reviewed host revision is recorded in `HOST-COMPATIBILITY.md`
+alongside this guide. Pin that host; a release number alone is insufficient.
 
-## Setup
+The tested mode is `plugins.isolation: in_process`. Dedicated plugin-host process
+isolation is not certified. Native validation reports inherited private host imports;
+re-run compatibility tests before upgrading Hermes. This is a separate lineage from
+the Vectorize catalog provider, despite sharing the name `hindsight`.
 
-```bash
-hermes memory setup    # select "hindsight"
-```
+## Install and setup, per profile
 
-The setup wizard prepares the provider's declared dependencies through Hermes PM, walks you through configuration, and offers to seed the bank with a **starter memory template** (a curated set of dispositions/instructions for common agent roles) — you can skip it, and it warns before overwriting an already-configured bank. Restart Hermes when setup reports that a new dependency generation is required.
-
-This repository preserves the owned durable Hindsight implementation extracted from Hermes v0.22.2. It is independently maintained and is not the Vectorize catalog distribution. The provider name remains `hindsight`, preserving configuration, tools, bank IDs and stored documents.
-
-Install the `hindsight` directory from a reviewed checkout into the active profile's `plugins/hindsight` directory **before** starting the extracted Hermes build. Do this for every configured profile. Native memory discovery is bundled-first: an older host that still bundles Hindsight will select its bundled implementation instead. Do not overlay an existing catalog installation or run `hermes plugins install hindsight` to install this variant; that bare name resolves to the separate catalog lineage.
-
-Example for a disposable profile (substitute your own absolute paths):
-
-```bash
-mkdir -p /tmp/hermes-example/plugins
-cp -a /opt/hermes-hindsight-durable/hindsight /tmp/hermes-example/plugins/hindsight
-HERMES_HOME=/tmp/hermes-example /opt/hermes/bin/hermes memory setup hindsight
-```
-
-For an operator-managed Git installation, Hermes also accepts `file:///opt/hermes-hindsight-durable#hindsight` as an explicit plugin source. Use a reviewed commit and the native installer; no remote publication or catalog listing is provided here.
-
-The native external-plugin PM union admits `hindsight-client==0.6.1` from the manifest for cloud and external connections. There is no bundled-provider PM exception, package self-installer, or SDK upgrade during a turn. Run `hermes pm repair` or `hermes memory setup hindsight` when dependencies need preparation, then restart when requested. The embedded dependency policy is unchanged: no embedded server or embedding dependency is newly installed or upgraded by this extraction.
-
-### Host compatibility and migration
-
-The supported host is Hermes v0.22.2 with the accompanying lifecycle corrections: FIFO session-switch foreground fencing and durable `rewound_message_uids` on undo/retry. A release version floor alone cannot express those patches. Stock v0.22.2 discovery works, but its lifecycle behavior is not certified for this durable variant. Older count-only callers retain the legacy rewind contract and cannot distinguish skipped turns; use the paired host for safe undo/retry.
-
-No server migration, bank rewrite, configuration conversion or data export is required. Existing profile-local configuration, legacy fallback configuration, tags, observation-scope exclusions, document IDs and optional `expose_retain_tool` remain supported. The host refuses automatic substitution of the catalog provider when this distribution is missing; install the reviewed copy explicitly. Native host-process isolation has not been exercised; the validated deployment is `plugins.isolation: in_process`. Inherited imports of private Hermes helpers produce native validation warnings and can break across releases; pin the paired host and re-run compatibility tests before upgrading. This extraction has not been admitted to the public plugin catalog.
-
-Automatic turn retention and pending operation ledgers are held in process memory. Accepted operations are settled, retried and drained within bounded lifecycle budgets; an unresolved shutdown is reported and preserves the live ledger, but this is not a disk outbox or a guarantee against process termination. Undo identity repair applies to the retained state owned by the running provider, not an arbitrary historical server document after process restart.
-
-### Disclosure and provenance
-
-Conversation turns and explicit memory-tool content are sent to the configured Hindsight endpoint. Automatic recall reads that bank; the provider does not mirror built-in Hermes memory writes. Setup can fetch bank templates from GitHub and write a selected template to the bank. Optional embedded mode can launch or reconnect a local daemon, write its profile environment and logs, and restart it when configuration changes. Legacy configuration/embedded-key fallbacks and setup-time environment-file updates remain from the original integration; review these before catalog submission. Runtime credential reads use Hermes secret scopes; this plugin never patches Hermes core.
-
-Code derives from NousResearch/hermes-agent under MIT; see `LICENSE` and `NOTICE`. This repository is not an endorsement or a catalog registration by Nous Research or Vectorize.
-
-### Tests
-
-Use the paired Hermes checkout's canonical `scripts/run_tests.sh` with this repository's absolute test-directory path and a PM-prepared test interpreter. Set temporary `HOME` and `HERMES_HOME` before invocation. Tests use native discovery, isolated profiles, SDK fixtures and offline wheel resolution; their network connections are denied. The installed interpreter must import the paired host, not an unrelated editable checkout. The tests also import Hermes's test helpers and therefore require its test source tree.
+Use the paired host and a reviewed full 40-character plugin commit. For example,
+with a local Git checkout at `/opt/hermes-hindsight-durable`:
 
 ```bash
-HOME=/tmp/hermes-test-user HERMES_HOME=/tmp/hermes-test-profile HERMES_PYTHON=/opt/hermes-test-env/bin/python bash /opt/hermes/scripts/run_tests.sh /opt/hermes-hindsight-durable/tests --file-retries 0
+hermes -p example plugins install 'file:///opt/hermes-hindsight-durable#hindsight' --ref <40-character-plugin-commit> --yes-deps --enable
+hermes -p example memory setup hindsight
 ```
 
+Repeat for each profile. The native installer records the exact revision and installs
+only the `hindsight` subdirectory under that profile's `$HERMES_HOME/plugins/hindsight`.
+PM provisions **hindsight-client==0.6.1**. Restart if dependency setup requests it.
+The wizard does not install packages itself. Do not use the bare catalog command
+`hermes plugins install hindsight` to obtain this variant.
 
-Or manually (cloud mode with defaults):
-```bash
-hermes config set memory.provider hindsight
-echo "HINDSIGHT_API_KEY=your-key" >> ~/.hermes/.env
+Choose cloud, `local_external` for a separately managed server, or `local_embedded`.
+For manual setup, first install and prepare dependencies as above, then create
+`$HERMES_HOME/hindsight/config.json`, configure the profile's credentials through
+Hermes secret configuration, and select `memory.provider: hindsight` in
+`$HERMES_HOME/config.yaml`. Example provider configuration, with no credentials:
+
+```json
+{
+  "mode": "local_external",
+  "api_url": "http://localhost:8888",
+  "bank_id_template": "hermes-{profile}",
+  "expose_retain_tool": false
+}
 ```
 
-### Cloud
+No bank migration or rewrite is required. Existing settings and server data remain
+in place. The paired host declines automatic replacement with the catalog lineage.
+If replacing another implementation, review its configuration before installing;
+this integration does not convert server data.
 
-Connects to the Hindsight Cloud API. Requires an API key from [ui.hindsight.vectorize.io](https://ui.hindsight.vectorize.io).
+## Configuration and data flow
 
-### Local Embedded
+The first nonempty valid configuration object wins: `$HERMES_HOME/hindsight/config.json`,
+then shared legacy `$HOME/.hindsight/config.json`. Files are not merged. With neither
+file, environment fallbacks populate mode, bank and budget. An existing shared legacy
+file can therefore select the same bank and credentials for multiple Hermes profiles.
+Create a profile-local file and distinct bank selection when isolation is intended.
+`memory.hindsight` in the host configuration is not read.
 
-Hermes spins up a local Hindsight daemon with built-in PostgreSQL. Requires an LLM API key for memory extraction and synthesis. The daemon starts automatically in the background on first use and stops after 5 minutes of inactivity.
+| Connection key | Default | Meaning |
+|---|---|---|
+| `mode` | `cloud` | `cloud`, `local_external`, or `local_embedded` |
+| `api_url` | Cloud API, or `http://localhost:8888` locally | Config value, then scoped `HINDSIGHT_API_URL`, then mode default |
+| `bank_id` | `hermes` | Static fallback bank |
+| `bank_id_template` | unset | Placeholders `{profile}`, `{workspace}`, `{platform}`, `{user}`, `{session}`; empty segments collapse |
+| `timeout` | `120` | Client request timeout in seconds |
+| `prefetch_waits_for_retain` | `true` | Await bounded retain settlement before background recall |
+| `prefetch_retain_drain_timeout` | `10` | Settlement budget in seconds; also bounds rewind repair and default drain |
 
-Embedded mode also requires separately provisioned, compatible `hindsight-all`, `hindsight-embed`, and `sentence-transformers` packages in the Hermes runtime. They are not installed by the provider's setup or `hermes pm repair`: their server dependency graph can conflict with Hermes's provider dependencies. The embedded availability check remains active; if this stack is unavailable, choose `local_external` and run the Hindsight server separately.
-
-Supports any OpenAI-compatible LLM endpoint (llama.cpp, vLLM, LM Studio, etc.) — pick `openai_compatible` as the provider and enter the base URL.
-
-Daemon startup logs: `~/.hermes/logs/hindsight-embed.log`
-Daemon runtime logs: `~/.hindsight/profiles/<profile>.log`
-
-To open the Hindsight web UI (local embedded mode only):
-```bash
-hindsight-embed -p hermes ui start
-```
-
-### Local External
-
-Points the plugin at an existing Hindsight instance you're already running (Docker, self-hosted, etc.). No daemon management — just a URL and an optional API key.
-
-## Config
-
-Config file: `~/.hermes/hindsight/config.json`
-
-### Connection
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `mode` | `cloud` | `cloud`, `local_embedded`, or `local_external` |
-| `api_url` | `https://api.hindsight.vectorize.io` | API URL (cloud and local_external modes) |
-
-### Memory Bank
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `bank_id` | `hermes` | Memory bank name (static fallback used when `bank_id_template` is unset or resolves empty) |
-| `bank_id_template` | — | Optional template to derive the bank name dynamically. Placeholders: `{profile}`, `{workspace}`, `{platform}`, `{user}`, `{session}`. Example: `hermes-{profile}` isolates memory per active Hermes profile. Empty placeholders collapse cleanly (e.g. `hermes-{user}` with no user becomes `hermes`). |
-| `bank_mission` | — | Reflect mission (identity/framing for reflect reasoning). Applied via Banks API. |
-| `bank_retain_mission` | — | Retain mission (steers what gets extracted). Applied via Banks API. |
+`bank_mission` and `bank_retain_mission` were never applied by this implementation;
+they are not supported settings. Configure bank missions on the server. Selecting a
+starter bank template in the wizard can fetch public templates and write the selected
+template to the configured bank.
 
 ### Recall
 
@@ -116,18 +90,13 @@ Config file: `~/.hermes/hindsight/config.json`
 | `recall_prompt_preamble` | — | Custom preamble for recalled memories in context |
 | `recall_tags` | — | Tags to filter when searching memories |
 | `recall_tags_match` | `any` | Tag matching mode: `any` / `all` / `any_strict` / `all_strict` |
-| `recall_types` | `observation` | Fact types surfaced by recall (both auto-recall and the `hindsight_recall` tool). Comma-separated string or JSON list. **Default narrowed to `observation` only** (see "Behavior change" below). Set to `observation,world,experience` to also include raw facts. |
+| `recall_types` | `observation` | Fact types surfaced by recall (both auto-recall and the `hindsight_recall` tool). Comma-separated string or JSON list. Default is `observation` only. Set to `observation,world,experience` to also include raw facts. |
 | `auto_recall` | `true` | Automatically recall memories before each turn |
 | `recall_sync` | `false` | Recall synchronously against the *current* message each turn (higher relevance, adds recall latency). Default off: recall runs in the background and is injected on the next turn. |
 | `recall_indicator` | `true` | Show a `👁️ Hindsight — recalled N memories` status line when auto-recall injects memory. Turn off for customer-facing agents. |
 
-> **Behavior change — `recall_types` defaults to `observation` only.**
->
-> Previously recall returned all three fact types. It now returns only observations.
->
-> Per [Hindsight's docs](https://hindsight.vectorize.io/developer/observations), observations are the **consolidated** knowledge layer Hindsight builds on top of raw facts: deduplicated beliefs grounded in evidence, refined as new facts arrive, with proof counts and freshness signals. Raw `world` / `experience` facts are the individual supporting evidence that feeds them. For per-turn context injection, observations are denser per token and avoid feeding the model multiple raw facts that one observation already summarizes.
->
-> Restore the broad recall with `"recall_types": "observation,world,experience"` (string or JSON list) in `~/.hermes/hindsight/config.json`. This applies to **both** auto-recall and the `hindsight_recall` tool — both read the same `recall_types` setting (the tool schema has no per-call `types` argument), so narrowing the default narrows both paths.
+Recall defaults to consolidated `observation` facts. Set `recall_types` to
+`observation,world,experience` to include raw facts in both automatic and tool recall.
 
 ### Retain
 
@@ -165,10 +134,10 @@ Config file: `~/.hermes/hindsight/config.json`
 | `llm_model` | per-provider | Model name (e.g. `gpt-4o-mini`, `qwen/qwen3.5-9b`) |
 | `llm_base_url` | — | Endpoint URL for `openai_compatible` (e.g. `http://192.168.1.10:8080/v1`) |
 
-The LLM API key is stored in `~/.hermes/.env` as `HINDSIGHT_LLM_API_KEY`.
+The LLM API key is stored in `$HERMES_HOME/.env` as `HINDSIGHT_LLM_API_KEY`.
 
 The embedded daemon is a subprocess that cannot see the per-turn secret
-scope, so it reads the key from `~/.hindsight/profiles/<profile>.env`
+scope, so it reads the key from `$HOME/.hindsight/profiles/<profile>.env`
 (materialized owner-only at setup and on config change). Key resolution
 order is explicit config → secret scope → the on-disk profile env, and the
 rewrite path is fail-closed: a build with no key never clobbers a profile
@@ -184,20 +153,81 @@ Available in `hybrid` and `tools` memory modes:
 | `hindsight_recall` | Multi-strategy search (semantic + entity graph) |
 | `hindsight_reflect` | Cross-memory synthesis (LLM-powered) |
 
-## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `HINDSIGHT_API_KEY` | API key for Hindsight Cloud |
-| `HINDSIGHT_LLM_API_KEY` | LLM API key for local mode |
-| `HINDSIGHT_API_LLM_BASE_URL` | LLM Base URL for local mode (e.g. OpenRouter) |
-| `HINDSIGHT_API_URL` | Override API endpoint |
-| `HINDSIGHT_BANK_ID` | Override bank name |
-| `HINDSIGHT_BUDGET` | Override recall budget |
-| `HINDSIGHT_MODE` | Override mode (`cloud`, `local_embedded`, `local_external`) |
-| `HINDSIGHT_RECALL_TAGS` | Recall tag fallback when `recall_tags` is absent from config; an explicitly empty config value disables the fallback |
-| `HINDSIGHT_RETAIN_OBSERVATION_SCOPE_EXCLUDE_TAG_PREFIXES` | Fallback list of volatile prefixes excluded from derived observation scopes |
+## Credential and environment fallbacks
 
-## Client Version
+Credentials resolve through Hermes's owning-profile secret scope. Explicit legacy
+`api_key` configuration precedes `HINDSIGHT_API_KEY`. Prefer scoped secrets over
+credentials in the provider JSON. `HINDSIGHT_MODE`, `HINDSIGHT_BANK_ID`, and
+`HINDSIGHT_BUDGET` are fallbacks only when no configuration file is loaded.
+`HINDSIGHT_API_URL` supplies an unset URL. `HINDSIGHT_RECALL_TAGS` applies only
+when `recall_tags` is absent; an explicit empty value suppresses it. Equivalent
+retain shaping fallbacks include `HINDSIGHT_RETAIN_TAGS`, `HINDSIGHT_RETAIN_SOURCE`,
+`HINDSIGHT_RETAIN_OBSERVATION_SCOPES`, and
+`HINDSIGHT_RETAIN_OBSERVATION_SCOPE_EXCLUDE_TAG_PREFIXES`.
 
-The native plugin manifest pins `hindsight-client==0.6.1`. Runtime checks report an older or unavailable client and direct the operator to Hermes PM; the provider never changes dependencies during a session.
+### Embedded mode
+
+The runtime must already contain compatible `hindsight-all`, `hindsight-embed`,
+`hindsight-client`, and `sentence-transformers`. Readiness checks imports and a callable
+`hindsight.HindsightEmbedded` before saving embedded setup; it does not download a
+server or upgrade client/embedding packages. The server dependency graph may conflict
+with the host: prefer a separately managed `local_external` server if it is not
+provisioned. Running as root or without the embedded stack disables this provider,
+including tools, recall, automatic retention and client creation.
+
+The embedded `profile` setting defaults to `hermes` and is **independent of the Hermes
+profile name**. Distinct Hermes profiles using that default share an embedded daemon
+and its `$HOME/.hindsight/profiles/hermes.env` credentials. Set distinct embedded
+`profile` values as well as banks to isolate them. Startup can materialize its
+owner-only profile environment and restart its daemon when configuration changes.
+An absent key never overwrites an existing embedded profile key.
+
+Startup log: `$HERMES_HOME/logs/hindsight-embed.log`. Daemon log:
+`$HOME/.hindsight/profiles/<embedded-profile>.log`. Embedded UI:
+`hindsight-embed -p <embedded-profile> ui start`.
+
+## Retention and rewind limits
+
+Automatic retention sends user and final assistant text to the configured endpoint.
+Local `message_uid` bookkeeping is stripped from remote content. Explicit retain
+sends the supplied text. Built-in Hermes memory writes are not mirrored.
+
+On Hindsight API ≥0.5.0 with source-text storage enabled, the session document may contain older provider lifetimes'
+memories. This plugin **never replaces or deletes that shared document on rewind**.
+CLI/TUI undo and retry cancel undispatched removed turns using message identities;
+already dispatched turns remain retained, including a removed answer. A subsequent
+retry may retain both versions. This conservative refusal protects earlier source
+content and extracted memories across restarts and A→B→A revisits.
+
+Unique per-lifetime documents on servers without append support can be repaired only
+when the local ledger and acknowledged request outcomes establish ownership. An
+unacknowledged request instead retains its original settlement ledger and future
+writes use a fresh document. `store_document_text=false` selects these unique
+documents; the plugin never enables server source-text storage.
+
+Messaging-gateway `/undo` and `/retry` do not notify memory before eviction in the
+paired host. They do not revoke retained memory. This inherited gap is not fixed by
+installing the plugin; CLI/TUI rewind guarantees must not be assumed for the gateway.
+
+Delivery state is in memory, not a disk outbox. Shutdown drains within a deadline,
+reports unresolved work, and releases settled buffers. Unresolved local work is lost
+on process exit. A timeout cancels the local coroutine where possible but cannot
+retract a request already accepted remotely; retries can duplicate appends. There is
+no exact-once guarantee. Foreground tools and recall wait behind a queued session
+switch, failing closed if the new owner is not ready.
+
+## Troubleshooting
+
+- Unavailable host: install the pinned host with memory lifecycle API 1; do not bypass
+  the capability check.
+- Missing client: run native memory setup or `hermes pm repair`, then restart when asked.
+- Missing embedded stack: provision it separately or select `local_external`.
+- Unexpected shared memories: check both the legacy fallback file and bank/embedded
+  profile selection. Changing profiles does not migrate existing bank contents.
+- Rewind refusal or shutdown deadline: retained data is preserved. Check server
+  operation status; do not repeatedly retry expecting an idempotent remote undo.
+
+See the repository's test launcher for offline development. License and attribution
+are included in `LICENSE` and `NOTICE`; this project is not endorsed by Nous Research
+or Vectorize.

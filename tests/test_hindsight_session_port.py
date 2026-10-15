@@ -7,7 +7,7 @@ from hindsight_test_provider import HindsightMemoryProvider
 def test_hindsight_local_config_and_manager_session_boundaries(monkeypatch):
     # Exercise the real profile config reader and manager/provider methods while
     # avoiding dependency installation; disabled recall/retention needs no SDK.
-    monkeypatch.setattr('hindsight_test_provider._maybe_upgrade_client', lambda: None)
+    monkeypatch.setattr('hindsight_test_provider._warn_if_client_outdated', lambda: None)
     provider = HindsightMemoryProvider()
     provider.save_config({
         'mode': 'local_external',
@@ -36,7 +36,7 @@ def test_hindsight_local_config_and_manager_session_boundaries(monkeypatch):
 
 
 def test_fork_provider_discovery_and_client_factory_are_profile_scoped(tmp_path, monkeypatch):
-    """A→B→A discovers the durable fork and builds each SDK client with its own credentials."""
+    """A→B→A discovers the durable provider and builds each SDK client with its own credentials."""
     import json
     import sys
     from pathlib import Path
@@ -51,7 +51,7 @@ def test_fork_provider_discovery_and_client_factory_are_profile_scoped(tmp_path,
     sdk.Hindsight = lambda **kwargs: calls.append(kwargs) or object()
     monkeypatch.setitem(sys.modules, "hindsight_client", sdk)
     monkeypatch.setattr(secret_scope, "_MULTIPLEX_ACTIVE", True)
-    monkeypatch.setattr("hindsight_test_provider._maybe_upgrade_client", lambda: None)
+    monkeypatch.setattr("hindsight_test_provider._warn_if_client_outdated", lambda: None)
     homes = [tmp_path / name for name in ("a", "b")]
     for home in homes:
         home.mkdir()

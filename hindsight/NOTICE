@@ -4,3 +4,4 @@ Includes contributions to the original integration by Vectorize and Hermes contr
 Extraction source: Hermes owned candidate ec745077f4bbd8086f593d590ec29d376939cdf7,
 based on Hermes v0.22.2 (d923a5eb487a17c0a68801bba9ef0f56c81040a8).
 This independently maintained durable variant is not the Vectorize catalog provider.
+Copyright (c) 2026 Thomas Marcelis, owned durable extensions and standalone corrections.

@@ -83,8 +83,10 @@ def test_equal_content_turns_use_identity_and_retry_does_not_revoke_survivor(pro
         assert provider.drain_pending(timeout=5)
     provider.on_session_switch("A", rewound=True, rewound_turns=1, rewound_message_uids=("answer-B",))
     assert provider.drain_pending(timeout=5)
-    content = json.loads(provider._client.aretain_batch.call_args.kwargs["items"][0]["content"])
-    assert [turn[-1]["message_uid"] for turn in content] == ["answer-A"]
+    assert provider._client.aretain_batch.await_count == 2
+    state = provider._active_delivery_state
+    assert [json.loads(turn)[-1]["message_uid"] for turn in state.confirmed_turns] == ["answer-A"]
+    assert "message_uid" not in provider._client.aretain_batch.call_args.kwargs["items"][0]["content"]
     provider.sync_turn("same question", "retry answer", messages=[{"role": "assistant", "message_uid": "answer-C"}])
     assert provider.drain_pending(timeout=5)
     state = provider._active_delivery_state

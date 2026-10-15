@@ -288,15 +288,13 @@ class TestConfig:
         assert provider._retain_every_n_turns == 1
         assert provider._recall_max_tokens == 4096
         assert provider._recall_max_input_chars == 800
-        assert provider._tags is None
+        assert provider._retain_tags == []
         assert provider._observation_scopes is None
         assert provider._recall_tags is None
         # Default recall narrowed to observation-only; world/experience are
         # aggregate facts that often crowd out concrete-event signal during
         # auto-recall. Users opt back in via the recall_types config key.
         assert provider._recall_types == ["observation"]
-        assert provider._bank_mission == ""
-        assert provider._bank_retain_mission is None
         assert provider._retain_context == "conversation between Hermes Agent and the User"
 
     def test_recall_types_default_is_observation_only(self, provider):
@@ -401,14 +399,12 @@ class TestConfig:
             auto_recall=False,
             retain_every_n_turns=3,
             retain_context="custom-ctx",
-            bank_retain_mission="Extract key facts",
             recall_max_tokens=2048,
             recall_types=["world", "experience"],
             recall_prompt_preamble="Custom preamble:",
             recall_max_input_chars=500,
-            bank_mission="Test agent mission",
         )
-        assert p._tags == ["tag1", "tag2"]
+        assert p._retain_tags == ["tag1", "tag2"]
         assert p._retain_tags == ["tag1", "tag2"]
         assert p._retain_source == "hermes"
         assert p._retain_user_prefix == "User (fakeusername)"
@@ -419,12 +415,10 @@ class TestConfig:
         assert p._auto_recall is False
         assert p._retain_every_n_turns == 3
         assert p._retain_context == "custom-ctx"
-        assert p._bank_retain_mission == "Extract key facts"
         assert p._recall_max_tokens == 2048
         assert p._recall_types == ["world", "experience"]
         assert p._recall_prompt_preamble == "Custom preamble:"
         assert p._recall_max_input_chars == 500
-        assert p._bank_mission == "Test agent mission"
 
     def test_retain_source_defaults_empty(self, provider):
         # Opt-in per AGENTS.md: no attribution tag ships by default.
@@ -514,8 +508,9 @@ class TestPostSetup:
 
         selections = iter([1, 0])  # local_embedded, openai
         monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
-        prepare_dependencies = MagicMock(return_value=({}, "installed"))
+        prepare_dependencies = MagicMock(side_effect=AssertionError("host already prepared dependencies"))
         monkeypatch.setattr("hermes_cli.memory_setup.prepare_memory_provider_dependencies", prepare_dependencies)
+        monkeypatch.setattr("hindsight_test_provider.setup._check_local_runtime", lambda: (True, None))
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
         monkeypatch.setattr("getpass.getpass", lambda prompt="": "sk-local-test")
@@ -524,7 +519,7 @@ class TestPostSetup:
         provider = HindsightMemoryProvider()
         provider.post_setup(str(hermes_home), {"memory": {}})
 
-        prepare_dependencies.assert_called_once_with("hindsight")
+        prepare_dependencies.assert_not_called()
         assert saved_configs[-1]["memory"]["provider"] == "hindsight"
         env_text = (hermes_home / ".env").read_text()
         assert "HINDSIGHT_LLM_API_KEY=sk-local-test\n" in env_text
@@ -747,10 +742,13 @@ class TestPrefetch:
     def test_async_default_ignores_current_query_and_reads_buffer(self, provider):
         # Default (recall_sync off): prefetch returns the buffered result and
         # does NOT issue a live recall for the current query.
-        provider._prefetch_result = "- buffered from previous turn"
+        provider._client.arecall.return_value = SimpleNamespace(results=[SimpleNamespace(text="buffered from previous turn")])
+        provider.queue_prefetch("previous query")
+        provider._prefetch_thread.join(timeout=2)
         result = provider.prefetch("a totally different current query")
         assert "buffered from previous turn" in result
-        provider._client.arecall.assert_not_called()
+        provider._client.arecall.assert_awaited_once()
+        assert provider._client.arecall.call_args.kwargs["query"] == "previous query"
 
     def test_queue_prefetch_skipped_in_tools_mode(self, provider_with_config):
         p = provider_with_config(memory_mode="tools")
@@ -957,7 +955,7 @@ class TestPrefetchServerRetainVisibility:
         )
         provider._client = client
 
-        assert provider._is_retain_op_complete("bank", "op-gone") is True
+        assert provider._retain_op_status("bank", "op-gone") == "completed"
 
     def test_transient_status_error_keeps_waiting(self, provider):
         """A transient status-check error means 'unknown', so keep waiting."""
@@ -968,7 +966,7 @@ class TestPrefetchServerRetainVisibility:
         )
         provider._client = client
 
-        assert provider._is_retain_op_complete("bank", "op-1") is False
+        assert provider._retain_op_status("bank", "op-1") == "pending"
 
     def test_operation_polling_preserves_each_immutable_bank(self, provider):
         seen = []
@@ -1034,13 +1032,10 @@ class TestPrefetchServerRetainVisibility:
         state = provider._active_delivery_state
         assert state.committed == 0
         assert state.queued == 1
-        assert provider._last_retained_turn_count == 0
-        assert provider._queued_retained_turn_count == 1
 
         assert provider.drain_pending(timeout=1.0)
         assert state.turn_base == 1 and state.turns == []
         assert state.committed == 0
-        assert provider._last_retained_turn_count == 0
 
     def test_failed_remote_append_retries_bounded_and_remains_retryable(
         self, provider_with_config, monkeypatch
@@ -1630,7 +1625,7 @@ class TestSessionSwitchBufferFlush:
         # skips _ensure_writer when no retain is due.
         p.sync_turn("turn1-user", "turn1-asst")
         p.sync_turn("turn2-user", "turn2-asst")
-        assert p._sync_thread is None
+        assert p._writer_thread is None
         p._client.aretain_batch.assert_not_called()
 
         # Switch — flush should fire under OLD document_id via the writer queue.
@@ -1743,7 +1738,7 @@ class TestSessionSwitchBufferFlush:
 
         monkeypatch.setattr(
             "hindsight_test_provider._check_api_supports_update_mode_append",
-            lambda *_args, **_kwargs: True,
+            lambda *_args, **_kwargs: False,
         )
         p = provider_with_config(retain_async=False)
         client = MagicMock()
@@ -1784,7 +1779,7 @@ class TestSessionSwitchBufferFlush:
         repair_call = client.aretain_batch.call_args_list[-1]
         repair_item = repair_call.kwargs["items"][0]
         repair_text = json.dumps(json.loads(repair_item["content"]))
-        assert repair_item["update_mode"] == "replace"
+        assert "update_mode" not in repair_item
         assert "user 1" in repair_text
         assert "user 2" not in repair_text
         assert "user 3" not in repair_text
@@ -1793,7 +1788,7 @@ class TestSessionSwitchBufferFlush:
     def test_completed_retain_rewind_rewrites_surviving_transcript(
         self, provider_with_config, monkeypatch, append_capable
     ):
-        """A completed remote document loses discarded turns in both write modes."""
+        """Shared append documents refuse repair; exclusively owned legacy documents repair."""
         monkeypatch.setattr(
             "hindsight_test_provider._check_api_supports_update_mode_append",
             lambda *_args, **_kwargs: append_capable,
@@ -1824,6 +1819,16 @@ class TestSessionSwitchBufferFlush:
         )
         p._retain_queue.join()
 
+        if append_capable:
+            assert client.aretain_batch.call_count == 3
+            client.documents.delete_document.assert_not_called()
+            p.sync_turn("user 4", "assistant 4")
+            p._retain_queue.join()
+            item = client.aretain_batch.call_args.kwargs["items"][0]
+            assert item["update_mode"] == "append"
+            assert len(json.loads(item["content"])) == 1
+            assert "user 4" in item["content"] and "user 1" not in item["content"]
+            return
         assert client.aretain_batch.call_count == 4
         repair_call = client.aretain_batch.call_args_list[3]
         repair_item = repair_call.kwargs["items"][0]
@@ -2035,7 +2040,7 @@ class TestUpdateModeAppendCapability:
         self._clear_capability_cache()
         monkeypatch.setattr(
             "hindsight_test_provider._fetch_hindsight_api_version",
-            lambda *a, **kw: "0.5.6",
+            lambda *a, **kw: {"version": "0.5.6"},
         )
         provider.sync_turn("hello", "hi")
         provider._retain_queue.join()
@@ -2107,7 +2112,7 @@ class TestUpdateModeAppendCapability:
         self._clear_capability_cache()
         monkeypatch.setattr(
             "hindsight_test_provider._fetch_hindsight_api_version",
-            lambda *a, **kw: "0.5.6",
+            lambda *a, **kw: {"version": "0.5.6"},
         )
         p = provider_with_config(retain_every_n_turns=3, retain_async=False)
         p.sync_turn("turn1-user", "turn1-asst")
@@ -2145,7 +2150,7 @@ class TestConfigSchema:
         keys = {f["key"] for f in schema}
         expected_keys = {
             "mode", "api_url", "api_key", "llm_provider", "llm_api_key",
-            "llm_model", "bank_id", "bank_id_template", "bank_mission", "bank_retain_mission",
+            "llm_model", "bank_id", "bank_id_template",
             "recall_budget", "memory_mode", "recall_prefetch_method",
             "retain_tags", "retain_source",
             "retain_user_prefix", "retain_assistant_prefix",
@@ -2435,8 +2440,6 @@ class TestPostSetupEnvEncoding:
         monkeypatch.setattr("hermes_cli.memory_setup._curses_select",
                             lambda *a, **kw: 0)  # cloud mode
         monkeypatch.setattr("hermes_cli.config.save_config", lambda c: None)
-        monkeypatch.setattr("hermes_cli.memory_setup.prepare_memory_provider_dependencies",
-                            lambda name: ({}, "installed"))
         # First line: API key prompt (readline). Second line: API URL (input).
         monkeypatch.setattr(sys, "stdin", io.StringIO("sk-new\n\n"))
 
@@ -2460,10 +2463,10 @@ class TestPostSetupEnvEncoding:
 
 class TestClientDependencyReadiness:
     def test_outdated_client_reports_pm_repair_without_mutation(self, monkeypatch, caplog):
-        from hindsight_test_provider import _maybe_upgrade_client
+        from hindsight_test_provider import _warn_if_client_outdated
         monkeypatch.setattr("importlib.metadata.version", lambda name: "0.0.1")
         monkeypatch.setattr("pm.sync_venv", lambda **kwargs: pytest.fail("runtime dependency mutation"))
-        _maybe_upgrade_client()
+        _warn_if_client_outdated()
         assert "hermes pm repair" in caplog.text
         assert "restart Hermes" in caplog.text
 
@@ -2556,5 +2559,4 @@ def test_append_mode_trims_retained_turns_without_dropping_any(provider, monkeyp
         provider.sync_turn(f"user {i}", f"assistant {i}")
 
     assert len(provider._session_turns) == 1  # only the un-retained tail (turn 7)
-    assert provider._last_retained_turn_count == 0
     assert len(shipped) == 6 and len({json.dumps(turn) for turn in shipped}) == 6

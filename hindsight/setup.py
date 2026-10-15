@@ -12,7 +12,10 @@ from agent.secret_scope import get_secret
 from hermes_cli.secret_prompt import masked_secret_prompt
 
 from . import templates as _hs_templates
-from .embedded import _embedded_profile_env_path, _load_simple_env, _materialize_embedded_profile_env
+from .embedded import (
+    _check_local_runtime, _embedded_profile_env_path, _load_simple_env,
+    _local_runtime_hint, _materialize_embedded_profile_env,
+)
 from .settings import (
     _DEFAULT_API_URL, _DEFAULT_IDLE_TIMEOUT, _DEFAULT_LOCAL_URL, _DEFAULT_TIMEOUT,
     _PROVIDER_DEFAULT_MODELS,
@@ -21,7 +24,7 @@ from .settings import (
 _MODE_VALUES = ["cloud", "local_embedded", "local_external"]
 _MODE_ITEMS = [
     ("Cloud", "Hindsight Cloud API (lightweight, just needs an API key)"),
-    ("Local Embedded", "Run Hindsight locally (downloads ~200MB, needs LLM key)"),
+    ("Local Embedded", "Use a separately provisioned embedded runtime (needs LLM key)"),
     ("Local External", "Connect to an existing Hindsight instance"),
 ]
 
@@ -77,10 +80,10 @@ def _prompt_embedded_llm(llm_provider: str, provider_config: dict, env_writes: d
 
 
 def run_setup(provider, hermes_home: str, config: dict) -> None:
-    """Configure Hindsight after PM admits its complete declared runtime."""
+    """Configure a provisioned runtime; the native host owns dependency preparation."""
     from hermes_cli.config import save_config
 
-    from . import _load_config
+    from . import _ensure_client_dependency, _load_config
 
     print("\n  Configuring Hindsight memory:\n")
 
@@ -91,6 +94,18 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
     mode = _select("  Select mode", _MODE_ITEMS, _MODE_VALUES, existing_config.get("mode"))
     if mode is None:
         return
+    # Direct post_setup callers receive the same read-only readiness gate, without
+    # preparing a second dependency candidate after the native setup command.
+    try:
+        _ensure_client_dependency()
+    except ImportError as exc:
+        print(f"  ⚠ {exc}")
+        return
+    if mode == "local_embedded":
+        available, reason = _check_local_runtime()
+        if not available:
+            print(f"  ⚠ Embedded runtime unavailable.{_local_runtime_hint(reason)}")
+            return
     provider_config: dict = dict(existing_config, mode=mode)
     env_writes: dict = {}
     hermes_env = Path(hermes_home) / ".env"
@@ -103,19 +118,6 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
         if llm_provider is None:
             return
         provider_config["llm_provider"] = llm_provider
-
-    print("\n  Checking dependencies...")
-    from hermes_cli.memory_setup import prepare_memory_provider_dependencies
-    from pm.package import InstallError
-
-    try:
-        _manifest, status = prepare_memory_provider_dependencies("hindsight")
-    except InstallError as exc:
-        print(f"  ⚠ Cannot prepare Hindsight dependencies: {exc}")
-        return
-    print("  ✓ Dependencies prepared")
-    if status == "restart_required":
-        print("  Restart Hermes to use the prepared dependencies.")
 
     if mode == "cloud":
         print("\n  Get your API key at https://ui.hindsight.vectorize.io\n")

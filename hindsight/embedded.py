@@ -1,4 +1,4 @@
-"""Local-embedded Hindsight runtime: import probe, install hint, the per-profile env
+"""Local-embedded Hindsight runtime: readiness probe, provisioning hint, per-profile env
 file the standalone ``hindsight-embed`` daemon consumes, and the health-grace export."""
 
 from __future__ import annotations
@@ -7,7 +7,6 @@ import contextlib
 import importlib
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,26 +19,11 @@ logger = logging.getLogger(__name__.rpartition(".")[0])
 # Read by hindsight_embed.daemon_embed_manager AT IMPORT TIME: how long to wait
 # for a slow /health before killing the daemon as stale. Busy hosts exceed the
 # upstream 2s check and get needlessly restarted, so it's plugin config.
-# Env var the embedded daemon manager reads (at import time, as a module-level constant) to size the grace
-# window it waits for a slow /health before declaring a daemon stale and killing it. We surface it as plugin
-# config so users can raise it without hand-setting an env var, consistent with "config.json, not raw env
-# vars". See #13125.
 _PORT_HEALTH_GRACE_ENV = "HINDSIGHT_EMBED_PORT_HEALTH_GRACE_TIMEOUT"
 
-# Stale embedded-daemon connection markers (client recreated, operation retried once).
+# Connection-establishment failures recreate the embedded client and retry once.
 _RETRIABLE_CONNECTION_MARKERS = (
     "cannot connect to host",
-    # Connection-establishment / DNS failure message patterns. These surface when the exception TYPE is
-    # generic (RuntimeError/Exception from a local shim, MCP bridge, subprocess wrapper, or an SDK that
-    # re-raises without chaining) so the _TRANSPORT_ERROR_TYPES check never fires, and the error carries no
-    # HTTP status. Without message-level matching they fall through to FailoverReason.unknown, which misses
-    # the transport eager-fallback path in the retry loop (unknown retries the same dead endpoint for the
-    # full budget before fallback). Ported from anomalyco/opencode#40707, which hit the same bug shape:
-    # serialized midstream errors matched by type only. Deliberately EXCLUDES mid-stream disconnect strings
-    # ("connection reset by peer", "peer closed connection", "unexpected eof", "socket hang up") — those
-    # belong to _SERVER_DISCONNECT_PATTERNS, whose classification step runs later and routes large sessions
-    # to context-overflow compression. A connection that was never established cannot be a server-side
-    # overflow rejection, so these are safe to classify as plain retryable transport.
     "connection refused",
     "connect call failed",
     "clientconnectorerror",
@@ -62,12 +46,16 @@ def _export_port_health_grace_timeout(config: dict[str, Any]) -> None:
 
 
 def _check_local_runtime() -> tuple[bool, str | None]:
-    """Whether the local embedded stack imports cleanly (older CPUs: NumPy can raise
-    at import, so Hermes degrades instead of retrying a broken backend).
-    ``sentence_transformers`` is probed too: ``hindsight`` imports fine with a broken
-    embedding stack, and the daemon would then abort on every retain/recall."""
+    """Probe provisioned imports without constructing a client or starting a daemon.
+
+    An importable namespace named ``hindsight`` is not sufficient. The embedded
+    client and its embedding stack must be available in this interpreter.
+    """
     try:
-        for module in ("hindsight", "hindsight_embed.daemon_embed_manager", "sentence_transformers"):
+        runtime = importlib.import_module("hindsight")
+        if not callable(getattr(runtime, "HindsightEmbedded", None)):
+            return False, "hindsight.HindsightEmbedded is unavailable; hindsight-all is missing or shadowed"
+        for module in ("hindsight_client", "hindsight_embed.daemon_embed_manager", "sentence_transformers"):
             importlib.import_module(module)
         return True, None
     except Exception as exc:
@@ -75,7 +63,7 @@ def _check_local_runtime() -> tuple[bool, str | None]:
 
 
 def _local_runtime_hint(reason: str | None) -> str:
-    """Explain the separately provisioned in-process embedded runtime (#7718)."""
+    """Explain the separately provisioned in-process embedded runtime."""
     detail = f" ({reason})" if reason else ""
     return (" Embedded mode requires separately provisioned, compatible hindsight-all, "
             "hindsight-embed and sentence-transformers packages in the Hermes runtime. "
