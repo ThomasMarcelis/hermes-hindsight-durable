@@ -27,7 +27,6 @@ or resolve a fresh production host dependency graph.
 ## Provenance
 
 Derived from the MIT-licensed NousResearch Hermes integration, including the owned
-durable extensions. See [LICENSE](LICENSE) and [NOTICE](NOTICE). The approved plugin
-publication destination is `ThomasMarcelis/hermes-hindsight-durable`; obtain the
-reviewed host revision from the operator before installation. No release or deployment
-is implied by this source tree.
+durable extensions. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Source: [ThomasMarcelis/hermes-hindsight-durable](https://github.com/ThomasMarcelis/hermes-hindsight-durable).
+The [host compatibility reference](hindsight/HOST-COMPATIBILITY.md) pins the paired host.

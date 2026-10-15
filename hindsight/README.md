@@ -21,11 +21,11 @@ the Vectorize catalog provider, despite sharing the name `hindsight`.
 
 ## Install and setup, per profile
 
-Use the paired host and a reviewed full 40-character plugin commit. For example,
-with a local Git checkout at `/opt/hermes-hindsight-durable`:
+Use the paired host and the `v1.0.2` release from this repository. For an immutable
+installation, replace the tag with its reviewed full commit hash:
 
 ```bash
-hermes -p example plugins install 'file:///opt/hermes-hindsight-durable#hindsight' --ref <40-character-plugin-commit> --yes-deps --enable
+hermes -p example plugins install 'https://github.com/ThomasMarcelis/hermes-hindsight-durable#hindsight' --ref v1.0.2 --yes-deps --enable
 hermes -p example memory setup hindsight
 ```
 
