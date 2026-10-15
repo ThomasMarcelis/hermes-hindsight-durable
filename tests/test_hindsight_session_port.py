@@ -1,4 +1,4 @@
-"""Real config/lifecycle integration for the owned Hindsight session port."""
+"""Profile config and session lifecycle integration."""
 from agent.memory_manager import MemoryManager
 from hermes_constants import get_hermes_home
 from hindsight_test_provider import HindsightMemoryProvider

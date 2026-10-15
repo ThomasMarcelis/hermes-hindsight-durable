@@ -175,16 +175,16 @@ def _check_api_supports_update_mode_append(api_url: str, api_key: str | None = N
         # A concurrent probe may have filled the cache meanwhile; its answer wins.
         supported = _append_capability_cache.setdefault(cache_key, supported)
     if supported:
-        logger.debug("Hindsight API %s version %s supports update_mode='append'", api_url, version)
+        logger.debug("Hindsight API version %s supports update_mode='append'", version)
     elif not source_text_stored:
-        logger.warning("Hindsight API %s has store_document_text=false; using per-process documents because append cannot read prior text", api_url)
+        logger.warning("Hindsight API has store_document_text=false; using per-process documents because append cannot read prior text")
     else:
-        logger.warning("Hindsight API at %s reports version %r, older than %s. "
+        logger.warning("Hindsight API reports version %r, older than %s. "
                        "Falling back to per-process document_id — retains across "
                        "processes/sessions create separate documents instead of "
                        "appending to a session-scoped one. Upgrade Hindsight to "
                        "%s+ to enable update_mode='append' deduplication.",
-                       api_url, version, _MIN_VERSION_FOR_UPDATE_MODE_APPEND, _MIN_VERSION_FOR_UPDATE_MODE_APPEND)
+                       version, _MIN_VERSION_FOR_UPDATE_MODE_APPEND, _MIN_VERSION_FOR_UPDATE_MODE_APPEND)
     return supported
 
 
@@ -530,8 +530,8 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         kwargs = {"base_url": self._api_url, "timeout": float(self._timeout or _DEFAULT_TIMEOUT)}
         if self._api_key:
             kwargs["api_key"] = self._api_key
-        logger.debug("Creating Hindsight cloud client (url=%s, has_key=%s, timeout=%s)",
-                     self._api_url, bool(self._api_key), kwargs["timeout"])
+        logger.debug("Creating Hindsight cloud client (has_key=%s, timeout=%s)",
+                     bool(self._api_key), kwargs["timeout"])
         return Hindsight(**kwargs)
 
     def _get_client(self):
@@ -674,8 +674,8 @@ class HindsightMemoryProvider(HindsightDurabilityMixin, MemoryProvider):
         with contextlib.suppress(Exception):
             from importlib.metadata import version as pkg_version
             client_version = pkg_version("hindsight-client")
-        logger.info("Hindsight initialized: mode=%s, api_url=%s, bank=%s, budget=%s, memory_mode=%s, prefetch_method=%s, client=%s",
-                    self._mode, self._api_url, self._bank_id, self._budget, self._memory_mode, self._prefetch_method, client_version)
+        logger.info("Hindsight initialized: mode=%s, bank=%s, budget=%s, memory_mode=%s, prefetch_method=%s, client=%s",
+                    self._mode, self._bank_id, self._budget, self._memory_mode, self._prefetch_method, client_version)
         if self._bank_id_template:
             logger.debug("Hindsight bank resolved from template %r: profile=%s workspace=%s platform=%s user=%s -> bank=%s",
                          self._bank_id_template, self._agent_identity, self._agent_workspace,

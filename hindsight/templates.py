@@ -78,7 +78,7 @@ def probe_existing_customization(api_url: str, bank_id: str, api_key: str | None
         with open_credentialed_url(req, timeout=_HTTP_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as e:  # missing bank / network — treat as not customized
-        logger.debug("Hindsight: bank customization probe skipped: %s", e)
+        logger.debug("Hindsight: bank customization probe skipped (%s)", type(e).__name__)
         return False
     return bool(data.get("bank") or data.get("mental_models") or data.get("directives"))
 
@@ -90,7 +90,7 @@ def run_template_step(*, api_url: str, bank_id: str, api_key: str | None, select
     try:
         entries = fetch_hermes_templates()
     except Exception as e:  # network/parse — non-fatal
-        logger.debug("Hindsight: could not fetch templates: %s", e)
+        logger.debug("Hindsight: could not fetch templates (%s)", type(e).__name__)
         return None
     if not entries:
         return None
@@ -123,6 +123,6 @@ def run_template_step(*, api_url: str, bank_id: str, api_key: str | None, select
         log(f"  ✓ Applied '{entry.get('name', entry['id'])}' template to bank '{bank_id}'")
         return entry["id"]
     except Exception as e:
-        log(f"  ⚠ Could not apply template ({e}). You can apply one later from "
+        log(f"  ⚠ Could not apply template ({type(e).__name__}). You can apply one later from "
             f"hindsight.vectorize.io/templates.")
         return None

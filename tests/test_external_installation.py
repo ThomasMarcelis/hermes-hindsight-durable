@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 
-def test_external_copies_discovered_outside_checkout_and_rebound_a_b_a(tmp_path):
+def test_external_copies_discovered_outside_checkout_and_rebound_a_b_a(tmp_path, request):
     source = Path(__file__).resolve().parents[1] / "hindsight"
     for name in ("a", "b"):
         home = tmp_path / name
@@ -29,4 +29,6 @@ def test_external_copies_discovered_outside_checkout_and_rebound_a_b_a(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(result.stdout)
     assert [Path(p).parent for p in evidence["providers"]] == [tmp_path / n / "plugins/hindsight" for n in ("a", "b", "a")]
-    print(json.dumps(evidence))
+    import agent.memory_manager
+    assert Path(evidence["manager"]).resolve() == Path(agent.memory_manager.__file__).resolve()
+    request.node.user_properties.append(("child_probe", evidence))

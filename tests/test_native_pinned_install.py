@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from tests.pm._fixtures import (
     _wheel,
@@ -17,13 +19,14 @@ from tests.pm._fixtures import (
 )
 
 
-def test_pinned_native_install_setup_and_profile_discovery(client, isolated_python, tmp_path, monkeypatch):
+def test_pinned_native_install_setup_and_profile_discovery(client, isolated_python, tmp_path, monkeypatch, request):
     from hermes_cli import plugins_cmd
     from hermes_cli.memory_setup import cmd_setup_provider
     from pm import paths
     from pm.environments import selected_venv
     from plugins.memory import find_provider_dir, load_memory_provider
     from agent.memory_provider import MEMORY_LIFECYCLE_API_VERSION
+    from agent.memory_manager import MemoryManager
 
     source = Path(__file__).resolve().parents[1]
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
@@ -38,7 +41,7 @@ def test_pinned_native_install_setup_and_profile_discovery(client, isolated_pyth
     monkeypatch.setattr(paths, 'repo_root', lambda: core)
     worker_toolchain(client, monkeypatch, isolated_python)
     monkeypatch.setattr(client, 'is_runtime', lambda: False)
-    client.lock_project(core)
+    client.lock_project(core, explicit=True, offline=True, cache=tmp_path / "cache")
     assert MEMORY_LIFECYCLE_API_VERSION >= 1
     monkeypatch.chdir(tmp_path)
     seen = []
@@ -67,14 +70,34 @@ def test_pinned_native_install_setup_and_profile_discovery(client, isolated_pyth
         cmd_setup_provider('hindsight')
         saved = json.loads((home / 'hindsight/config.json').read_text())
         assert saved['mode'] == 'local_external'
-        provider.save_config({**saved, 'bank_id': profile, 'auto_recall': False}, str(home))
+        provider.save_config({**saved, 'bank_id': profile, 'auto_recall': True, 'recall_sync': True, 'retain_async': False}, str(home))
         monkeypatch.setattr(module, '_check_api_supports_update_mode_append', lambda *args: True)
+        assert provider.is_available()
         provider.initialize('session-A', agent_identity=profile)
         assert provider._bank_id == profile
         assert provider.get_tool_schemas()
-        provider.on_session_switch('session-B')
-        provider.on_session_switch('session-A')
-        provider.shutdown()
+        transport = SimpleNamespace(
+            aretain_batch=AsyncMock(return_value=SimpleNamespace()),
+            arecall=AsyncMock(return_value=SimpleNamespace(results=[SimpleNamespace(text='fixture memory')])),
+            aclose=AsyncMock(),
+        )
+        provider._client = transport
+        manager = MemoryManager()
+        manager.add_provider(provider)
+        try:
+            for session in ('session-B', 'session-A'):
+                manager.queue_session_switch(session)
+                assert manager.flush_pending(timeout=5)
+                assert 'error' not in json.loads(manager.handle_tool_call('hindsight_retain', {'content': 'fixture fact'}))
+                assert 'fixture memory' in manager.prefetch_all('fixture query', session_id=session)
+                assert transport.aretain_batch.call_args.kwargs['bank_id'] == profile
+                assert transport.arecall.call_args.kwargs['bank_id'] == profile
+            calls = transport.aretain_batch.await_count
+            manager.on_memory_write('add', 'memory', 'fixture builtin note')
+            assert manager.flush_pending(timeout=5)
+            assert transport.aretain_batch.await_count == calls
+        finally:
+            manager.shutdown_all()
         assert not (home / 'memories/MEMORY.md').exists()
         seen.append(str(module.__file__))
         environment = selected_venv(core)
@@ -85,6 +108,6 @@ def test_pinned_native_install_setup_and_profile_discovery(client, isolated_pyth
             cwd=tmp_path, capture_output=True, text=True, timeout=30, check=True)
         assert check.stdout.strip() == '0.6.1'
     assert seen[0] != seen[1]
-    print(json.dumps({'native_source': identifier, 'revision': revision, 'origins': seen,
+    request.node.user_properties.append(('native_install', {'native_source': identifier, 'revision': revision, 'origins': seen,
                       'dependency': 'synthetic hindsight-client==0.6.1 wheel',
                       'pm': str(environment)}))

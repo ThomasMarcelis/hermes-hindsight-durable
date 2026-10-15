@@ -45,6 +45,7 @@ if args[:2] == ['-m', 'pytest']:
                 'pid': os.getpid(), 'exit': int(exitstatus), 'origins': origins,
                 'foreign_host_modules': foreign,
                 'tests': [str(item.fspath) for item in session.items],
+                'evidence': {item.nodeid: item.user_properties for item in session.items if item.user_properties},
             }, indent=2) + '\n', encoding='utf-8')
             if foreign:
                 session.exitstatus = 1

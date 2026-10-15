@@ -230,3 +230,60 @@ def test_rewind_while_remote_request_is_unacknowledged(factory, outcome):
     assert resumed.drain_pending(timeout=2)
     assert not any(mode in ('replace', 'delete') for mode, _, _ in remote.calls)
     assert 'Assistant: older lifetime' in remote.facts[('hermes', 'A')]
+
+
+def test_sdk_failures_do_not_echo_request_secrets_or_transcripts(factory, caplog):
+    import logging
+    remote = RemoteDocuments()
+    provider = factory(remote)
+    sensitive = 'fixture-secret-and-private-transcript'
+    provider._client.aretain_batch = AsyncMock(side_effect=RuntimeError(sensitive))
+    provider._client.arecall = AsyncMock(side_effect=RuntimeError(sensitive))
+    with caplog.at_level(logging.DEBUG):
+        result = provider.handle_tool_call('hindsight_retain', {'content': sensitive})
+        assert 'error' in json.loads(result)
+        assert sensitive not in result
+        turn(provider, 'local-id', sensitive)
+        provider._auto_recall = True
+        provider._recall_sync = True
+        assert provider.prefetch('question') == ''
+    assert sensitive not in caplog.text
+
+
+@pytest.mark.parametrize('storage', ['memory', 'sqlite', 'resumed'])
+@pytest.mark.parametrize('surface', ['cli', 'tui'])
+@pytest.mark.parametrize('outcome', ['completed', 'interrupted', 'empty'])
+def test_real_finalizer_to_provider_retry_preserves_surviving_memory(factory, tmp_path, monkeypatch, storage, surface, outcome):
+    from hermes_state import SessionDB
+    from tests.agent.test_memory_live_rewind_identity import _LiveAgent, _finish, _rewind
+
+    monkeypatch.setattr('hermes_cli.plugins.invoke_hook', lambda *args, **kwargs: [])
+    remote = RemoteDocuments()
+    provider = factory(remote, session='sess-test')
+    db = SessionDB(db_path=tmp_path / 'state.db') if storage != 'memory' else None
+    if db is not None:
+        db.create_session('sess-test', source='cli')
+    agent = _LiveAgent(db, provider)
+    try:
+        history = _finish(agent, [], 'first', 'completed')
+        first_uid = history[-1]['message_uid']
+        if storage == 'resumed':
+            agent._memory_manager.shutdown_all()
+            history = db.get_resume_conversations(agent.session_id)[0]
+            provider = factory(remote, session='sess-test')
+            agent = _LiveAgent(db, provider)
+        history = _finish(agent, history, 'second', outcome)
+        history = _rewind(agent, history, surface, 'retry')
+        assert agent._memory_manager.flush_pending(timeout=5)
+        assert history[-1]['message_uid'] == first_uid
+        history = _finish(agent, history, 'second', 'completed')
+        assert history[-1]['message_uid'] != first_uid
+        _rewind(agent, history, surface, 'undo')
+        assert agent._memory_manager.flush_pending(timeout=5)
+        assert 'Assistant: answer to first' in remote.facts[('hermes', 'sess-test')]
+        assert not any(mode in ('replace', 'delete') for mode, _, _ in remote.calls)
+        assert 'message_uid' not in json.dumps(list(remote.documents.values()))
+    finally:
+        agent._memory_manager.shutdown_all()
+        if db is not None:
+            db.close()
