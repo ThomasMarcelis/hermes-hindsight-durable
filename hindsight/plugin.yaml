@@ -1,0 +1,10 @@
+name: hindsight
+version: 1.0.1
+kind: exclusive
+requires_hermes: ">=0.22.2"
+description: "Hindsight — long-term memory with knowledge graph, entity resolution, and multi-strategy retrieval."
+python_dependencies:
+  # Cloud/external connections share the established client. The embedded server's
+  # dependency graph must not constrain every Hermes profile using an external API.
+  - "hindsight-client==0.6.1"
+requires_env: []
